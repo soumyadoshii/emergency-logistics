@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Emergency Logistics - Graph + Min-Heap</title>
+<style>
+ body{font-family:system-ui,sans-serif;margin:14px;background:#f4f5f7;color:#222;font-size:14px}
+ h1{font-size:19px;margin:0 0 10px} h3{margin:0 0 6px;font-size:14px}
+ .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start}
+ .card{background:#fff;border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}
+ svg{background:#fff;border:1px solid #ccc;border-radius:8px;width:740px;max-width:100%}
+ table{border-collapse:collapse;font-size:12.5px} td,th{border:1px solid #ddd;padding:3px 8px;text-align:center}
+ select,input,button{padding:4px 8px;margin:2px 0} button.main{background:#1a3a6b;color:#fff;border:0;border-radius:5px;padding:7px 14px;font-weight:600;cursor:pointer}
+ button{cursor:pointer} .road{cursor:pointer;stroke-width:4} .road:hover{stroke-width:8}
+ #log{font:11.5px/1.45 monospace;height:260px;overflow:auto;white-space:pre-wrap;background:#fafafa}
+ .small{font-size:12px;color:#555} .pill{display:inline-block;background:#e8efff;border-radius:10px;padding:2px 9px;margin:2px 3px 2px 0}
+ tr.sel td{background:#fff1d6} #adj{font:11.5px/1.5 monospace} .root td{background:#e8f7e8}
+</style></head><body>
+<h1>Emergency Logistics &amp; Resource Allocation &mdash; Graph + Min-Heap</h1>
+<div class="row">
+ <div>
+  <svg id="map" viewBox="0 0 780 480"></svg>
+  <div class="small">Road label: minutes | free/total capacity this wave. Click a road to block/reopen it. Red dashed = blocked, purple = full, orange = used by the selected shipment(s). Centers show severity.</div>
+  <div class="card" style="margin-top:10px"><h3>Decision log (every heap pop and Dijkstra step)</h3><div id="log"></div></div>
+ </div>
+ <div style="width:430px;max-width:100%">
+  <div class="card"><h3>1. Requests (go into the urgency min-heap)</h3>
+   <select id="rc"></select><select id="rr"></select> qty <input id="rq" type="number" value="30" style="width:60px">
+   <button onclick="addReq()">Add request</button><br>
+   <button onclick="act('/api/demo')">Add 7 sample requests</button>
+   <button class="main" onclick="act('/api/dispatch')">Dispatch wave</button>
+   <button onclick="act('/api/reset')">Reset</button></div>
+  <div class="card"><h3>Urgency heap &mdash; raw array</h3><div id="heap" class="small"></div>
+   <h3 style="margin-top:8px">Order it will be served</h3><div id="serve" class="small"></div></div>
+  <div class="card"><h3>Warehouse stock</h3><table id="stock"></table>
+   <div style="margin-top:6px">Restock <select id="sw"></select><select id="sr"></select><input id="sq" type="number" value="30" style="width:55px"><button onclick="restock()">Add</button></div></div>
+  <div class="card"><h3>Last wave &mdash; shipments (click a row)</h3><div id="ship" class="small">No wave yet.</div></div>
+  <div class="card"><h3>Proof the data structures are working</h3><div id="stats"></div></div>
+  <div class="card"><h3>Graph &mdash; adjacency list (linked list per node)</h3><div id="adj"></div></div>
+ </div>
+</div>
+<script>
+let S, sel = -1;
+const $ = id => document.getElementById(id);
+async function act(url) {
+  const r = await fetch(url, {method: 'POST'}); const j = await r.json();
+  if (j.error) { alert(j.error); return; } S = j; sel = -1; render();
+}
+const addReq = () => act(`/api/request?center=${$('rc').value}&resource=${$('rr').value}&qty=${$('rq').value}`);
+const restock = () => act(`/api/restock?w=${$('sw').value}&r=${$('sr').value}&q=${$('sq').value}`);
+async function roadClick(n) { await act('/api/road?name=' + n); }
+function pick(i) { sel = (sel === i) ? -1 : i; render(); }
+
+function render() {
+  const N = {}; S.nodes.forEach(n => N[n.name] = n);
+  if (!$('rc').options.length) {
+    S.nodes.filter(n => n.type === 'C').forEach(n => $('rc').add(new Option(`${n.name} (severity ${n.severity})`, n.name)));
+    S.nodes.filter(n => n.type === 'W').forEach(n => $('sw').add(new Option(n.name, n.name)));
+    S.resources.forEach(r => { $('rr').add(new Option(r, r)); $('sr').add(new Option(r, r)); });
+  }
+  const used = new Set();
+  (sel >= 0 ? [S.shipments[sel]] : S.shipments).forEach(s => s && s.roads.forEach(r => used.add(r)));
+  let svg = '';
+  S.roads.forEach(r => {
+    const a = N[r.a], b = N[r.b], full = !r.blocked && r.residual === 0, on = used.has(r.name);
+    const col = r.blocked ? '#d33' : on ? '#f08a00' : full ? '#8e44ad' : '#aab';
+    svg += `<line class="road" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${col}" ${r.blocked ? 'stroke-dasharray="8 6"' : ''} ${on ? 'style="stroke-width:7"' : ''} onclick="roadClick('${r.name}')"/>`;
+    svg += `<text x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 6}" font-size="10.5" text-anchor="middle" fill="#222" stroke="#fff" stroke-width="3" paint-order="stroke">${r.blocked ? 'X ' : ''}${r.time}m | ${r.residual}/${r.capacity}</text>`;
+  });
+  S.nodes.forEach(n => {
+    const c = n.type === 'W' ? '#2e9b4f' : n.type === 'C' ? (n.severity >= 5 ? '#c0392b' : '#e08e0b') : '#888';
+    svg += `<circle cx="${n.x}" cy="${n.y}" r="18" fill="${c}" stroke="#fff" stroke-width="2"/><text x="${n.x}" y="${n.y + 4}" text-anchor="middle" fill="#fff" font-size="12" font-weight="bold">${n.name}</text>`;
+    if (n.type === 'C') svg += `<text x="${n.x}" y="${n.y + 33}" text-anchor="middle" font-size="11">severity ${n.severity}</text>`;
+  });
+  $('map').innerHTML = svg;
+
+  $('stock').innerHTML = '<tr><th></th>' + S.resources.map(r => `<th>${r}</th>`).join('') + '</tr>' +
+    S.nodes.filter(n => n.type === 'W').map(n => `<tr><th>${n.name}</th>` + n.stock.map(v => `<td>${v}</td>`).join('') + '</tr>').join('');
+
+  $('heap').innerHTML = S.heap.length ? '<table><tr><th>idx</th><th>request</th><th>severity</th><th>parent idx</th></tr>' +
+    S.heap.map(h => `<tr class="${h.i === 0 ? 'root' : ''}"><td>${h.i}</td><td>${h.center} ${h.resource} ${h.qty}</td><td>${h.severity}</td><td>${h.parent < 0 ? 'root' : h.parent}</td></tr>`).join('') + '</table>' : 'Heap is empty.';
+  $('serve').innerHTML = S.serveOrder.length ? S.serveOrder.map((h, i) => `<span class="pill">${i + 1}. ${h.center} ${h.resource} ${h.qty}</span>`).join('') : '&mdash;';
+
+  $('ship').innerHTML = S.shipments.length ? '<table><tr><th>qty</th><th>item</th><th>from</th><th>to</th><th>route</th><th>min</th></tr>' +
+    S.shipments.map((s, i) => `<tr class="${i === sel ? 'sel' : ''}" style="cursor:pointer" onclick="pick(${i})"><td>${s.qty}</td><td>${s.resource}</td><td>${s.from}</td><td>${s.to}</td><td>${s.route}</td><td>${s.time}</td></tr>`).join('') + '</table>' : 'No wave yet.';
+
+  const t = S.stats;
+  $('stats').innerHTML = `<span class="pill">wave ${S.wave}</span><span class="pill">delivered ${t.delivered} units</span><span class="pill">still pending ${t.pendingUnits}</span><br>` +
+    `<span class="pill">urgency heap: ${t.urgencyPushes} pushes / ${t.urgencyPops} pops</span>` +
+    `<span class="pill">Dijkstra runs: ${t.dijkstraRuns}</span><span class="pill">Dijkstra heap pops: ${t.dijkstraPops}</span>`;
+
+  $('adj').innerHTML = S.adjacency.map(a => `${a.node.padEnd(3)} -> ` + a.roads.map(r => `[${r}]`).join(' -> ') + ' -> null').join('\n').replace(/\n/g, '<br>');
+  $('log').textContent = S.log.join('\n'); $('log').scrollTop = $('log').scrollHeight;
+}
+fetch('/api/state').then(r => r.json()).then(j => { S = j; render(); });
+</script></body></html>
